@@ -1,0 +1,389 @@
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+import ij.process.*;
+import ij.ImagePlus;
+import ij.io.FileSaver;
+import java.text.SimpleDateFormat;
+import java.util.Calendar;
+import java.util.Date;
+import java.util.Scanner;
+import java.awt.*;
+import java.awt.event.*;
+import javax.swing.*;
+import net.miginfocom.swing.MigLayout;
+import org.micromanager.api.AcquisitionOptions;
+
+print("");
+gui.closeAllAcquisitions();
+gui.clearMessageWindow();
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// Read settings file written by GUI script
+////////////////////////////////////////////////////////////////////////////////////
+print("Reading file");
+localDir = bsh.cwd;
+localFile = localDir + "\\User Defined Acquisition Settings.txt";
+
+String content = null;
+File file = new File(localFile);
+FileReader reader = new FileReader(file);
+char[] chars = new char[(int) file.length()];
+reader.read(chars);
+content = new String(chars);
+reader.close();
+
+String[] fromfile = content.split("\n");
+guiexperimenttype  = fromfile[0].trim();
+guiexposure        = fromfile[1].trim();
+guibinning         = fromfile[2].trim();
+guitrigp           = fromfile[3].trim();
+guitrigd           = fromfile[4].trim();
+double guiacqspeed     = Double.parseDouble(fromfile[5].trim());
+int    intguiacqspeed  = (int) guiacqspeed;
+double guitrials       = Double.parseDouble(fromfile[6].trim());
+double guitrialduration = Double.parseDouble(fromfile[7].trim());
+int    intduration     = (int) guitrialduration;
+double guitrialints    = Double.parseDouble(fromfile[8].trim());
+int    inttrialinterval = (int) guitrialints;
+guisavepath        = fromfile[9].trim();
+guicommand         = fromfile[10].trim();
+// switchcommand line 11, stiminterval line 12, patterncommand line 13
+guigrowthlight     = (fromfile.length > 14) ? fromfile[14].trim() : "0";
+guibfinterval      = (fromfile.length > 15) ? fromfile[15].trim() : "0";
+
+// Multi-Stimulus extra fields
+if (guiexperimenttype.equals("Multi-Stimulus")) {
+    guistimcommand = fromfile[11].trim();
+    double guistimints = Double.parseDouble(fromfile[12].trim());
+    int intstiminterval = (int) guistimints;
+    global.stimulusinterval = intstiminterval * 1000;
+}
+
+print("");
+print("Growth Light (%): " + guigrowthlight);
+print("BF Interval (min): " + guibfinterval);
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// Configuration
+////////////////////////////////////////////////////////////////////////////////////
+acq.setFrames(intduration, intguiacqspeed);
+TOTAL_TRIALS = guitrials;
+INTERVAL_SEC = guitrialints;
+SERIAL_WAIT  = 3000;
+port = mmc.getProperty("ArduinoValveControl", "ShowPort");
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// Abort flag â€” set to true by the Abort button; checked inside acquisition loops
+////////////////////////////////////////////////////////////////////////////////////
+// volatile ensures the flag is visible across the Swing event thread and the
+// script execution thread without requiring explicit synchronisation.
+volatile boolean abortRequested = false;
+
+
+////////////////////////////////////////////////////////////////////////////////////
+// Helper: build and show the status / progress window.
+// Returns the JTextArea so callers can append messages to it.
+// The window also contains an Abort button that sets abortRequested = true.
+////////////////////////////////////////////////////////////////////////////////////
+JTextArea buildStatusWindow(String title) {
+    JFrame fw = new JFrame(title);
+    fw.setSize(320, 500);
+    fw.setLocation(1250, 300);
+    fw.setResizable(false);
+    JPanel cp = fw.getContentPane();
+    cp.setLayout(new MigLayout());
+
+    JLabel summarylbl = new JLabel("Acquisition Status");
+    summarylbl.setForeground(Color.BLUE);
+    summarylbl.setFont(new Font("Serif", Font.BOLD, 14));
+
+    JTextArea ta = new JTextArea(20, 40);
+    ta.setEditable(false);
+    JScrollPane scroll = new JScrollPane(ta,
+        JScrollPane.VERTICAL_SCROLLBAR_ALWAYS,
+        JScrollPane.HORIZONTAL_SCROLLBAR_ALWAYS);
+
+    JButton abortBtn = new JButton("Abort");
+    abortBtn.setBackground(Color.RED);
+    abortBtn.setForeground(Color.WHITE);
+    abortBtn.setFont(abortBtn.getFont().deriveFont(Font.BOLD));
+    abortBtn.setPreferredSize(new Dimension(120, 28));
+    abortBtn.addActionListener(new ActionListener() {
+        public void actionPerformed(ActionEvent e) {
+            abortRequested = true;
+            abortBtn.setEnabled(false);
+            abortBtn.setText("Aborting...");
+            print("*** Abort requested by user.");
+        }
+    });
+
+    cp.add(summarylbl, "gapbottom 1, span, split 2, aligny center");
+    cp.add(new JSeparator(), "gapleft rel, growx");
+    cp.add(scroll, "wrap");
+    cp.add(abortBtn, "center, wrap");
+
+    fw.pack();
+    fw.show();
+    global.statusFrame = fw;
+    return ta;
+}
+
+
+//####################################################################################
+// MAIN LOOP â€” SINGLE-STIMULUS
+//####################################################################################
+if (guiexperimenttype.equals("Single-Stimulus")) {
+
+    textArea = buildStatusWindow("Experiment Progress");
+
+    for (acqCounter = 1; acqCounter <= TOTAL_TRIALS; acqCounter++) {
+
+        // Check abort flag at the top of every iteration
+        if (abortRequested) {
+            print("Acquisition loop aborted before trial " + acqCounter + ".");
+            textArea.append("\n*** Aborted before trial " + acqCounter + " ***\n");
+            statusFrame.pack();
+            break;
+        }
+
+        // Wait between acquisitions (skip before the first)
+        if (acqCounter > 1) {
+            syswait = (int)(INTERVAL_SEC * 1000 - acqduration - 3);
+            print("Waiting " + syswait / 1000.0 + " seconds until next acquisition.");
+            textArea.append("Waiting " + syswait / 1000.0 + " s until next acquisition.\n");
+            statusFrame.pack();
+            mmc.sleep(syswait);
+        }
+
+        // Check abort again after the inter-trial wait
+        if (abortRequested) {
+            print("Acquisition loop aborted during wait before trial " + acqCounter + ".");
+            textArea.append("\n*** Aborted during wait before trial " + acqCounter + " ***\n");
+            statusFrame.pack();
+            break;
+        }
+
+        firsttime = System.currentTimeMillis();
+
+        // Send stimulus command to Arduino
+        mmc.setSerialPortCommand(port, guicommand, "/n");
+
+        // Build filename with zero-padded trial counter
+        if      (acqCounter < 10)  movzeros = "00";
+        else if (acqCounter < 100) movzeros = "0";
+        else                       movzeros = "";
+        String dateStr = new SimpleDateFormat("yyyy MM dd HH_mm_").format(new Date());
+        filename = "stream_" + dateStr + "mov" + movzeros + acqCounter;
+        root     = guisavepath;
+
+        mmc.sleep(SERIAL_WAIT);
+
+        print("Acquisition " + acqCounter + " started.");
+        textArea.append("Acquisition " + acqCounter + " started.\n");
+        textArea.append("  Start time: " + firsttime + "\n");
+        statusFrame.pack();
+
+        // Open and run acquisition
+        acqName = filename;
+        gui.openAcquisition(acqName, root, intduration, 1, 1, 1, true, true);
+
+        int width         = (int) mmc.getImageWidth();
+        int height        = (int) mmc.getImageHeight();
+        int bytesPerPixel = (int) mmc.getBytesPerPixel();
+        int bitDepth      = (int) mmc.getImageBitDepth();
+        gui.initializeAcquisition(acqName, width, height, bytesPerPixel, bitDepth);
+
+        mmc.startSequenceAcquisition(intduration, 0, true);
+        int frame = 0;
+        double exposureMs = mmc.getExposure();
+        while (mmc.getRemainingImageCount() > 0 || mmc.isSequenceRunning(mmc.getCameraDevice())) {
+            if (abortRequested) {
+                mmc.stopSequenceAcquisition();
+                print("Sequence acquisition stopped by abort request.");
+                break;
+            }
+            if (mmc.getRemainingImageCount() > 0) {
+                img = mmc.popNextTaggedImage();
+                gui.addImageToAcquisition(acqName, frame, 0, 0, 0, img);
+                frame++;
+            } else {
+                mmc.sleep((long) Math.min(0.5 * exposureMs, 20));
+            }
+        }
+        mmc.stopSequenceAcquisition();
+
+        // Wait for MM acquisition engine to finish
+        Thread.currentThread().sleep(2000);
+        while (gui.isAcquisitionRunning()) {
+            mmc.sleep(250);
+        }
+
+        // Record completion
+        acqendtime  = System.currentTimeMillis();
+        acqduration = acqendtime - firsttime;
+        print("Acquisition " + acqCounter + " complete.  End time: " + acqendtime);
+        textArea.append("Acquisition " + acqCounter + " complete.\n  End time: " + acqendtime + "\n");
+        statusFrame.pack();
+
+        // Save and close
+        gui.getAcquisition(filename).promptToSave(false);
+        gui.closeAcquisitionWindow(filename);
+
+        // Break out of loop if abort was triggered during acquisition
+        if (abortRequested) break;
+
+    } // End Single-Stimulus loop
+
+    // Final cleanup
+    mmc.sleep(2000);
+    mmc.setSerialPortCommand(port, "v2off", "/n");
+    print("Closed outflow valve.");
+    String endMsg = abortRequested ? "\n*** Experiment aborted by user ***" : "\n*** End of Script ***";
+    print(endMsg);
+    textArea.append("\nClosed outflow valve." + endMsg + "\n");
+    statusFrame.pack();
+
+} // End Single-Stimulus block
+
+
+//####################################################################################
+// MAIN LOOP â€” MULTI-STIMULUS
+//####################################################################################
+if (guiexperimenttype.equals("Multi-Stimulus")) {
+
+    textArea = buildStatusWindow("Experiment Progress");
+
+    print(guistimcommand);
+    String[] tokens = guistimcommand.split("[,]");
+
+    stimLoop:
+    for (int i = 0; i <= tokens.length - 2; i = i + 2) {
+
+        if (abortRequested) {
+            print("Abort requested; stopping stimulus loop.");
+            textArea.append("*** Abort requested; stopping stimulus loop. ***\n");
+            statusFrame.pack();
+            break stimLoop;
+        }
+
+        mmc.setSerialPortCommand(port, "v2off", "/n");
+        print(tokens[i + 1] + "\tWASH");
+        print(tokens[i]);
+        print("Waiting for confirmation: Confirmed");
+        mmc.setSerialPortCommand(port, tokens[i], "/n");
+        print("Stimulus sleep start");
+        mmc.sleep(stimulusinterval);
+        print("Stimulus sleep end");
+        mmc.setSerialPortCommand(port, "v2on", "/n");
+
+        for (acqCounter = 1; acqCounter <= TOTAL_TRIALS; acqCounter++) {
+
+            if (abortRequested) {
+                print("Acquisition loop aborted before trial " + acqCounter + ".");
+                textArea.append("\n*** Aborted before trial " + acqCounter + " ***\n");
+                statusFrame.pack();
+                break stimLoop;
+            }
+
+            if (acqCounter > 1) {
+                syswait = (int)(INTERVAL_SEC * 1000 - acqduration - 3);
+                print("Waiting " + syswait / 1000.0 + " seconds until next acquisition.");
+                textArea.append("Waiting " + syswait / 1000.0 + " s until next acquisition.\n");
+                statusFrame.pack();
+                mmc.sleep(syswait);
+            }
+
+            if (abortRequested) {
+                print("Abort detected during inter-trial wait.");
+                textArea.append("*** Aborted during inter-trial wait. ***\n");
+                statusFrame.pack();
+                break stimLoop;
+            }
+
+            firsttime = System.currentTimeMillis();
+
+            // Send pulse command
+            mmc.setSerialPortCommand(port, guicommand, "/n");
+
+            // Zero-padded filename
+            if      (acqCounter < 10)  movzeros = "00";
+            else if (acqCounter < 100) movzeros = "0";
+            else                       movzeros = "";
+            String dateStr = new SimpleDateFormat("yyyy MM dd HH_mm_").format(new Date());
+            filename = "stream_" + dateStr + "mov" + movzeros + acqCounter;
+            root     = guisavepath;
+
+            mmc.sleep(SERIAL_WAIT);
+
+            print("Acquisition " + acqCounter + " started.");
+            textArea.append("Acquisition " + acqCounter + " started.\n");
+            statusFrame.pack();
+
+            acqName = filename;
+            gui.openAcquisition(acqName, root, intduration, 1, 1, 1, true, true);
+
+            int width         = (int) mmc.getImageWidth();
+            int height        = (int) mmc.getImageHeight();
+            int bytesPerPixel = (int) mmc.getBytesPerPixel();
+            int bitDepth      = (int) mmc.getImageBitDepth();
+            gui.initializeAcquisition(acqName, width, height, bytesPerPixel, bitDepth);
+
+            mmc.startSequenceAcquisition(intduration, 0, true);
+            int frame = 0;
+            double exposureMs = mmc.getExposure();
+            while (mmc.getRemainingImageCount() > 0 || mmc.isSequenceRunning(mmc.getCameraDevice())) {
+                if (abortRequested) {
+                    mmc.stopSequenceAcquisition();
+                    break;
+                }
+                if (mmc.getRemainingImageCount() > 0) {
+                    img = mmc.popNextTaggedImage();
+                    gui.addImageToAcquisition(acqName, frame, 0, 0, 0, img);
+                    frame++;
+                } else {
+                    mmc.sleep((long) Math.min(0.5 * exposureMs, 20));
+                }
+            }
+            mmc.stopSequenceAcquisition();
+
+            Thread.currentThread().sleep(2000);
+            while (gui.isAcquisitionRunning()) {
+                mmc.sleep(250);
+            }
+
+            acqendtime  = System.currentTimeMillis();
+            acqduration = acqendtime - firsttime;
+            print("Acquisition " + acqCounter + " complete.  End time: " + acqendtime);
+            textArea.append("Acquisition " + acqCounter + " complete.\n");
+            statusFrame.pack();
+
+            // Save and close
+            String savethispath = guisavepath + "\\\\" + filename + ".tif";
+            ij.IJ.saveAs("Tiff", savethispath);
+            gui.getAcquisition(acqName).promptToSave(false);
+            gui.closeAcquisitionWindow(acqName);
+
+            if (abortRequested) break stimLoop;
+
+        } // End trial loop
+
+        mmc.sleep(2000);
+
+    } // End stimulus loop
+
+    String endMsg = abortRequested ? "\n*** Experiment aborted by user ***" : "\n*** End of Script ***";
+    print(endMsg);
+    textArea.append(endMsg + "\n");
+    statusFrame.pack();
+
+} // End Multi-Stimulus block
+
+
+// Local Variables:
+// tab-width: 4
+// indent-tabs-mode: nil
+// End:
