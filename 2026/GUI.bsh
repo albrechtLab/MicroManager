@@ -177,7 +177,7 @@ cp.setLayout(new MigLayout("ins 20", "[para]0[][1001p,fill][601p][951p,fill]"));
 void rebuildGUI(String expType) {
     cp.removeAll();
 
-    // â”€â”€ Section 1: Camera Settings (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Section 1: Camera Settings (always visible) ---------
     cp.add(settingslbl, "gapbottom 1, span, split 2, aligny center");
     cp.add(new JSeparator(), "gapleft rel,growx");
 
@@ -200,14 +200,14 @@ void rebuildGUI(String expType) {
     cp.add(bfintervallbl);
     cp.add(bfintervalinput, "wrap 10");
 
-    // â”€â”€ Section 2: Experiment Type (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Section 2: Experiment Type (always visible) ----------
     cp.add(experimenttypelbl, "gapbottom 1, span, split 2, aligny center");
     cp.add(new JSeparator(), "gapleft rel,growx");
     cp.add(a, "wrap");
     cp.add(b, "wrap");
     cp.add(c, "wrap 10");
 
-    // â”€â”€ Section 3: Experiment Settings (varies by type) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Section 3: Experiment Settings (varies by type) ----------
     cp.add(expsetlbl, "gapbottom 1, span, split 2, aligny center");
     cp.add(new JSeparator(), "gapleft rel,growx");
 
@@ -246,7 +246,7 @@ void rebuildGUI(String expType) {
         cp.add(trialintinput, "wrap 10");
     }
 
-    // â”€â”€ Section 4: Save Directory + Action Buttons (always visible) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Section 4: Save Directory + Action Buttons (always visible) ----------
     cp.add(saverlbl, "gapbottom 1, span, split 2, aligny center");
     cp.add(new JSeparator(), "gapleft rel,growx");
     cp.add(directoryinput, "span 3");
@@ -281,12 +281,12 @@ initializex = a.getText();
 ////////////////////////////////////////////////////////////////////////////////////
 void actionPerformed(ActionEvent e) {
 
-    // â”€â”€ Track selected experiment type â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Track selected experiment type ----------
     if (a.isSelected()) initializex = a.getText();
     if (b.isSelected()) initializex = b.getText();
     if (c.isSelected()) initializex = c.getText();
 
-    // â”€â”€ Rebuild GUI when experiment type radio buttons change â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // -- Rebuild GUI when experiment type radio buttons change ----------
     if (e.getSource() == a || e.getSource() == b || e.getSource() == c) {
         rebuildGUI(initializex);
         return;
@@ -340,7 +340,7 @@ void actionPerformed(ActionEvent e) {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////
-    // Stimulus pulse drop-down â€” prompt for custom value if "Other" selected
+    // Stimulus pulse drop-down - prompt for custom value if "Other" selected
     ////////////////////////////////////////////////////////////////////////////////////
     if (e.getSource() == exptype) {
         command = expvalues[exptype.getSelectedIndex()];
@@ -473,7 +473,7 @@ void actionPerformed(ActionEvent e) {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////
-    // Save Settings â€” write current field values to a user-chosen text file
+    // Save Settings - write current field values to a user-chosen text file
     ////////////////////////////////////////////////////////////////////////////////////
     if (e.getActionCommand() == "Save Settings") {
         String exposuretext      = input.getText();
@@ -556,7 +556,7 @@ void actionPerformed(ActionEvent e) {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////
-    // Load Settings â€” read field values from a previously saved text file
+    // Load Settings - read field values from a previously saved text file
     ////////////////////////////////////////////////////////////////////////////////////
     if (e.getActionCommand() == "Load Settings") {
         JFileChooser chooser2 = new JFileChooser(directoryinput.getText());
@@ -637,7 +637,7 @@ void actionPerformed(ActionEvent e) {
     }
 
     ////////////////////////////////////////////////////////////////////////////////////
-    // Apply Settings â€” validate, write settings file, apply camera properties,
+    // Apply Settings - validate, write settings file, apply camera properties,
     // and show summary window
     ////////////////////////////////////////////////////////////////////////////////////
     if (e.getActionCommand() == "Apply") {
@@ -665,6 +665,8 @@ void actionPerformed(ActionEvent e) {
         if (initializex == "Multi-Stimulus") {
             global.stimchangevalid = false;
             if (gotcommand == true) stimchangevalid = true;
+        } else {
+        	   stimchangevalid = true;
         }
 
         try {
