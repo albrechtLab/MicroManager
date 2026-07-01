@@ -77,7 +77,7 @@ port = mmc.getProperty("ArduinoValveControl", "ShowPort");
 
 
 ////////////////////////////////////////////////////////////////////////////////////
-// Abort flag â€” set to true by the Abort button; checked inside acquisition loops
+// Abort flag - set to true by the Abort button; checked inside acquisition loops
 ////////////////////////////////////////////////////////////////////////////////////
 // volatile ensures the flag is visible across the Swing event thread and the
 // script execution thread without requiring explicit synchronisation.
@@ -134,7 +134,7 @@ JTextArea buildStatusWindow(String title) {
 
 
 //####################################################################################
-// MAIN LOOP â€” SINGLE-STIMULUS
+// MAIN LOOP - SINGLE-STIMULUS
 //####################################################################################
 if (guiexperimenttype.equals("Single-Stimulus")) {
 
@@ -251,7 +251,7 @@ if (guiexperimenttype.equals("Single-Stimulus")) {
 
 
 //####################################################################################
-// MAIN LOOP â€” MULTI-STIMULUS
+// MAIN LOOP - MULTI-STIMULUS
 //####################################################################################
 if (guiexperimenttype.equals("Multi-Stimulus")) {
 
