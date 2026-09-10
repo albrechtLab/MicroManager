@@ -756,7 +756,7 @@ if (guiexperimenttype.equals("Single-Stimulus")) {
     cp(SETTINGS_FILE, MMfolder + "/Experiment_" + ExpDate + "_settings.txt");
 
     // Start data logger
-    String saveFile   = MMfolder + "/data_log.log";
+    String saveFile   = MMfolder + "/Experiment_" + ExpDate + "_data.log";
     int    secToRecord = inttrialinterval * (int) guitrials;
     ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
     mmc.sleep(2000);
