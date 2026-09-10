@@ -822,7 +822,7 @@ if (guiexperimenttype.equals("Multi-Stimulus")) {
     cp(SETTINGS_FILE, MMfolder + "/Experiment_" + ExpDate + "_settings.txt");
 
     // Start data logger  (was missing in original)
-    String saveFile    = MMfolder + "/data_log.log";
+    String saveFile    = MMfolder + "/Experiment_" + ExpDate + "_data.log";
     int    secToRecord = inttrialinterval * (int) guitrials * positionList.length;
     ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
     mmc.sleep(2000);
@@ -955,7 +955,7 @@ if (guiexperimenttype.equals("Multi-Pattern")) {
 
         int secToRecord = (int)(seqDurationSec * patternRepeats); // total experiment sec including delays
         displayInfo("Logger duration estimate: " + secToRecord + "s (" + seqDurationSec + "s/repeat x " + patternRepeats + " repeats)");
-        String saveFile = MMfolder + "/data_log.log";
+        String saveFile = MMfolder + "/Experiment_" + ExpDate + "_data.log";
         ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
         mmc.sleep(2000);
 
