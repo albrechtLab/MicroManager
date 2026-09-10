@@ -911,12 +911,49 @@ if (guiexperimenttype.equals("Multi-Pattern")) {
         // Ensure outflow valve is open
         serialWrite(vport, "v2on");
 
-        // Estimate logger duration: count only digit (capturing) steps
-        int capturingSteps = 0;
+        // Estimate logger duration for one full pass of the sequence string,
+        // then multiply by patternRepeats.
+        //
+        // Per sequence pass we sum:
+        //   - Each digit (capturing) step contributes inttrialinterval seconds
+        //     (acquisition duration + inter-trial wait; interval already covers both).
+        //   - Each letter (non-capturing) step contributes its actual duration:
+        //       delay:Xmin / delay:Xs -> parsed delay seconds
+        //       valve commands        -> negligible (~SERIAL_WAIT ms), counted as 0
+        //   - Letter steps have no inter-trial wait of their own.
+        //
+        // We deliberately add a 10% headroom margin at the end so the logger
+        // does not cut off if any step runs slightly long.
+
+        int seqDurationSec = 0;
         for (int ci = 0; ci < sequenceString.length(); ci++) {
-            if (Character.isDigit(sequenceString.charAt(ci))) capturingSteps++;
+            String lbl = String.valueOf(sequenceString.charAt(ci));
+            if (Character.isDigit(sequenceString.charAt(ci))) {
+                // Capturing step: counts as one full trial interval
+                seqDurationSec += inttrialinterval;
+            } else {
+                // Non-capturing step: parse actual delay if defined
+                if (patternDefs.containsKey(lbl)) {
+                    String mcCmd = ((String[]) patternDefs.get(lbl))[0];
+                    if (mcCmd.startsWith("delay:")) {
+                        String dspec = mcCmd.substring(6).trim().toLowerCase();
+                        try {
+                            if (dspec.endsWith("min")) {
+                                seqDurationSec += Integer.parseInt(dspec.replace("min","").trim()) * 60;
+                            } else if (dspec.endsWith("s")) {
+                                seqDurationSec += Integer.parseInt(dspec.replace("s","").trim());
+                            }
+                        } catch (Exception ex) {
+                            print("WARNING: Could not parse delay duration '" + dspec + "' for logger estimate — assuming 0s.");
+                        }
+                    }
+                    // valve commands: duration negligible, add nothing
+                }
+            }
         }
-        int secToRecord = capturingSteps * patternRepeats * inttrialinterval;
+
+        int secToRecord = (int)(seqDurationSec * patternRepeats * 1.10); // +10% headroom
+        displayInfo("Logger duration estimate: " + secToRecord + "s (" + seqDurationSec + "s/repeat x " + patternRepeats + " repeats + 10% margin)");
         String saveFile = MMfolder + "/data_log.log";
         ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
         mmc.sleep(2000);
