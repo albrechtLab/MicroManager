@@ -257,7 +257,8 @@ void displayInfo(String info)
     print(info);
     if (textArea != null) {
         textArea.append(info + "\n");
-        f4.revalidate();
+        f4.pack();
+        f4.show();
     }
 }
 
@@ -952,8 +953,8 @@ if (guiexperimenttype.equals("Multi-Pattern")) {
             }
         }
 
-        int secToRecord = (int)(seqDurationSec * patternRepeats * 1.10); // +10% headroom
-        displayInfo("Logger duration estimate: " + secToRecord + "s (" + seqDurationSec + "s/repeat x " + patternRepeats + " repeats + 10% margin)");
+        int secToRecord = (int)(seqDurationSec * patternRepeats); // total experiment sec including delays
+        displayInfo("Logger duration estimate: " + secToRecord + "s (" + seqDurationSec + "s/repeat x " + patternRepeats + " repeats)");
         String saveFile = MMfolder + "/data_log.log";
         ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
         mmc.sleep(2000);
