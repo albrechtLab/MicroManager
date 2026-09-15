@@ -1,0 +1,511 @@
+// ============================================================
+// StimValidation.bsh
+// ============================================================
+// Purpose:
+//   Validate electrical stimulation current and voltage waveforms
+//   using a fast (4 kHz continuous) datalogger, without any
+//   MicroManager image acquisition.
+//
+//   Steps:
+//     1. Define testing variables (totalTimePerPattern, stimTimePerPattern).
+//     2. Parse each digit-labelled pattern from the experiment settings
+//        file, rebuild its S# command with the overridden train duration,
+//        send it to StimJim, and verify acceptance.
+//     3. Start the datalogger at 4 kHz for the full expected duration.
+//     4. Trigger each pattern in sequence with T#, waiting
+//        totalTimePerPattern between triggers.
+//     5. Send T-1 to force-stop stimulation at the end.
+//
+// StimJim S command format (from stimjimPulser.ino):
+//   S<n>,<mode0>,<mode1>,<period_us>,<duration_us>; <a0>,<a1>,<dur>; ...
+//   Field positions before the first ";", 0-based after "S<n>,":
+//     0: mode0   1: mode1   2: period_us   3: duration_us  <- we override this
+//   Stage groups follow each ";" as: amplitude0, amplitude1, stageDuration_us
+//
+// StimJim acknowledgement: on a valid S command the firmware calls
+//   printPulseTrainParameters(), which always contains "mV" or "uA".
+//   waitForSerial(sport, "V") catches both (the "V" in "mV"/"uA").
+//
+// Derived from MicroManagerAcquisition.bsh (albrechtLab/MicroManager).
+// ============================================================
+
+import java.io.File;
+import java.io.FileReader;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.Date;
+import java.text.SimpleDateFormat;
+import java.awt.*;
+import java.awt.event.*;
+import javax.swing.*;
+import net.miginfocom.swing.MigLayout;
+
+// ============================================================
+// CONFIG BLOCK
+// ============================================================
+String SETTINGS_FILE     = "C:/Users/qntl/Desktop/User Defined Acquisition Settings.txt";
+String PYTHON_PATH       = "C:\\Users\\qntl\\AppData\\Local\\Programs\\Python\\Python312\\python";
+String LOGGER_SCRIPT     = "C:\\Users\\qntl\\datalog.py";
+String LOGGER_COM_PORT   = "COM17";
+String FALLBACK_SAVEPATH = "D:/tmp";
+int    SERIAL_WAIT       = 1500;   // ms to wait after each serial write
+
+// ============================================================
+// Step 1 — Testing variables
+// ============================================================
+double TOTAL_TIME_PER_PATTERN_SEC = 1.0;   // total slot per pattern (s)
+double STIM_TIME_PER_PATTERN_SEC  = 0.5;   // pulse-train duration sent to StimJim (s)
+
+// Output sub-folder created inside the experiment save path
+String WAVEFORM_FOLDER_NAME = "E_stim_waveforms";
+
+// Derived
+long TOTAL_TIME_PER_PATTERN_MS = (long)(TOTAL_TIME_PER_PATTERN_SEC * 1000.0);
+long STIM_TIME_PER_PATTERN_US  = (long)(STIM_TIME_PER_PATTERN_SEC  * 1_000_000.0);
+
+// ============================================================
+// Global state
+// ============================================================
+volatile boolean abortRequested = false;
+JFrame    f4       = null;
+JTextArea textArea = null;
+JButton   abort    = null;
+String    goodguisavepath = FALLBACK_SAVEPATH;
+
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// FUNCTIONS
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+// ------------------------------------------------------------
+// readTextInfo — load settings file; set goodguisavepath from line 9
+// ------------------------------------------------------------
+String[] readTextInfo(String filename)
+{
+    File file = new File(filename);
+    FileReader reader = new FileReader(file);
+    char[] chars = new char[(int) file.length()];
+    reader.read(chars);
+    reader.close();
+    String[] lines = new String(chars).split("\n");
+
+    if (lines.length > 9) {
+        String rawPath = lines[9].trim();
+        if (rawPath.length() > 0) {
+            goodguisavepath = rawPath.replace("\\", "/");
+        } else {
+            print("WARNING: Save path (line 9) empty — using fallback: " + FALLBACK_SAVEPATH);
+            goodguisavepath = FALLBACK_SAVEPATH;
+        }
+    } else {
+        print("WARNING: Settings file too short — using fallback: " + FALLBACK_SAVEPATH);
+        goodguisavepath = FALLBACK_SAVEPATH;
+    }
+    return lines;
+}
+
+// ------------------------------------------------------------
+// createInfoWindow
+// ------------------------------------------------------------
+JFrame createInfoWindow(String windowName)
+{
+    if (f4 != null)
+        f4.dispatchEvent(new WindowEvent(f4, WindowEvent.WINDOW_CLOSING));
+
+    f4 = new JFrame(windowName);
+    f4.setSize(440, 520);
+    f4.setLocation(1250, 300);
+    f4.setResizable(false);
+
+    JPanel cp4 = (JPanel) f4.getContentPane();
+    cp4.setLayout(new MigLayout("wrap 1", "[grow,fill]"));
+
+    JLabel lbl = new JLabel("Stim Validation Status");
+    lbl.setForeground(Color.BLUE);
+    lbl.setFont(new Font("Serif", Font.BOLD, 14));
+
+    global.abort = new JButton("Abort");
+    abort.addActionListener(new ActionListener() {
+        public void actionPerformed(ActionEvent e) {
+            int choice = JOptionPane.showConfirmDialog(
+                f4,
+                "Abort stimulation validation?\nThe current wait will end safely.",
+                "Confirm Abort",
+                JOptionPane.YES_NO_OPTION,
+                JOptionPane.WARNING_MESSAGE);
+            if (choice == JOptionPane.YES_OPTION) {
+                global.abortRequested = true;
+                displayInfo("*** ABORT requested — finishing current step safely ***");
+                abort.setEnabled(false);
+                abort.setText("Aborting...");
+            }
+        }
+    });
+
+    global.textArea = new JTextArea(22, 42);
+    textArea.setEditable(false);
+    JScrollPane scroll = new JScrollPane(textArea,
+        JScrollPane.VERTICAL_SCROLLBAR_ALWAYS,
+        JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+
+    cp4.add(lbl, "split 2, aligny center");
+    cp4.add(new JSeparator(), "growx");
+    cp4.add(abort, "w 120!, h 28!");
+    cp4.add(scroll, "grow, push");
+    f4.pack();
+    f4.setVisible(true);
+    return f4;
+}
+
+// ------------------------------------------------------------
+// displayInfo — print to MM log and status window
+// ------------------------------------------------------------
+void displayInfo(String info)
+{
+    print(info);
+    if (textArea != null) {
+        textArea.append(info + "\n");
+        f4.pack();
+        f4.setVisible(true);
+    }
+}
+
+// ------------------------------------------------------------
+// mkDir — create directory
+// ------------------------------------------------------------
+void mkDir(String path)
+{
+    File p = new File(path);
+    if (p.mkdirs())
+        print("Created directory: " + path);
+    else
+        print("Directory exists or could not be created: " + path);
+}
+
+// ------------------------------------------------------------
+// waitForSerial — poll port until testString appears or timeout (~5 s)
+// ------------------------------------------------------------
+void waitForSerial(String portName, String testString)
+{
+    boolean found = false;
+    int j = 0;
+    while (!found && j < 50) {
+        j++;
+        String str1 = "";
+        Object answer = mmc.readFromSerialPort(portName);
+        if (answer.capacity() > 0) {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < answer.capacity(); i++)
+                sb.append((char) answer.get(i));
+            str1 = sb.toString();
+        }
+        if (str1.contains(testString))
+            found = true;
+        else
+            mmc.sleep(100);
+    }
+    if (!found)
+        print("WARNING: waitForSerial timed out waiting for '"
+              + testString + "' on " + portName);
+}
+
+// ------------------------------------------------------------
+// ConfigureLogging — launch Python datalogger at 4 kHz continuous
+//
+// Logger argument string: -sn2,f1,i250,L0,R<secToRecord>
+//   n2   = 2 channels (current + voltage)
+//   f1   = fast/binary format
+//   i250 = 250 µs sample interval => 4 kHz
+//   L0   = no hardware-trigger limit (continuous)
+//   R    = ring/continuous mode
+// ------------------------------------------------------------
+void ConfigureLogging(String pythonPath, String scriptPath,
+                      String comPort, String saveFile, int secToRecord)
+{
+    String logArgs = "-sn2,f1,i250,L0,R" + secToRecord;
+    String[] cmd = new String[] { pythonPath, "-u", scriptPath, comPort, saveFile, logArgs };
+
+    displayInfo("Starting 4 kHz datalogger -> " + saveFile);
+    displayInfo("  Logger args: " + logArgs);
+
+    Process process = Runtime.getRuntime().exec(cmd);
+
+    new Thread(new Runnable() {
+        public void run() {
+            try {
+                BufferedReader br = new BufferedReader(
+                    new InputStreamReader(process.getInputStream()));
+                String s;
+                while ((s = br.readLine()) != null)
+                    print("Logger: " + s);
+            } catch (Exception e) { print("Logger stdout error: " + e.getMessage()); }
+        }
+    }).start();
+
+    new Thread(new Runnable() {
+        public void run() {
+            try {
+                BufferedReader br = new BufferedReader(
+                    new InputStreamReader(process.getErrorStream()));
+                String s;
+                while ((s = br.readLine()) != null)
+                    print("Logger stderr: " + s);
+            } catch (Exception e) { print("Logger stderr error: " + e.getMessage()); }
+        }
+    }).start();
+
+    print("Logger started in background.");
+}
+
+// ------------------------------------------------------------
+// rebuildSCommand
+//
+// Given the original S command string from the settings file
+// (e.g. "S0,0,1,1000,100000; 100,-100,100; -50,50,20;"),
+// replace the duration field (5th argument = index 3 after
+// "S<n>," = the 4th comma-separated token in the header block
+// before the first ";") with newDurationUs, and return the
+// rebuilt command.
+//
+// Header fields before first ";", positions after "S":
+//   0: ptIndex   1: mode0   2: mode1   3: period_us   4: duration_us
+// We keep everything after the first ";" (stage blocks) unchanged.
+// ------------------------------------------------------------
+String rebuildSCommand(String originalCmd, long newDurationUs)
+{
+    // Split into header block and stage blocks at the first ";"
+    int firstSemi = originalCmd.indexOf(';');
+    if (firstSemi < 0) {
+        print("WARNING: S command has no ';' — cannot parse: " + originalCmd);
+        return originalCmd;
+    }
+    String header    = originalCmd.substring(0, firstSemi).trim();  // "S0,0,1,1000,100000"
+    String stages    = originalCmd.substring(firstSemi);            // "; 100,-100,100; ..."
+
+    // Split header on commas: [S0] [0] [1] [1000] [100000]
+    String[] fields = header.split(",");
+    if (fields.length < 5) {
+        print("WARNING: S command header has fewer than 5 fields — cannot override duration: "
+              + originalCmd);
+        return originalCmd;
+    }
+
+    // Field index 4 is duration_us — replace it
+    fields[4] = String.valueOf(newDurationUs);
+
+    StringBuilder sb = new StringBuilder();
+    for (int i = 0; i < fields.length; i++) {
+        if (i > 0) sb.append(",");
+        sb.append(fields[i].trim());
+    }
+    sb.append(stages);
+    return sb.toString();
+}
+
+
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+// MAIN SCRIPT
+// %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+print("");
+gui.clearMessageWindow();
+
+// ----------------------------------------------------------
+// Locate StimJim serial port (required)
+// ----------------------------------------------------------
+boolean stimExists = false;
+String sport = "";
+try {
+    sport = mmc.getProperty("Stimjim", "ShowPort");
+    stimExists = true;
+} catch (Exception e) {
+    print("ERROR: StimJim not found — this script requires a StimJim. Aborting.");
+    return;
+}
+
+// ----------------------------------------------------------
+// Read experiment settings file
+// ----------------------------------------------------------
+String[] fromfile = readTextInfo(SETTINGS_FILE);
+
+// Pattern definitions begin at line index 11
+// (line 10 is the sequence string; lines 11+ are labelled patterns).
+int PATTERN_DEFS_START = 11;
+
+// ----------------------------------------------------------
+// Open status window and log configuration
+// ----------------------------------------------------------
+String ExpDate = new SimpleDateFormat("yyyy-MM-dd-HH-mm").format(new Date());
+f4 = createInfoWindow("Stim Validation — " + ExpDate);
+displayInfo("Settings file: " + SETTINGS_FILE);
+displayInfo("Save path:     " + goodguisavepath);
+displayInfo(String.format("Total time/pattern:  %.3f s", TOTAL_TIME_PER_PATTERN_SEC));
+displayInfo(String.format("Stim duration/pattern: %.3f s  (%d µs)",
+            STIM_TIME_PER_PATTERN_SEC, STIM_TIME_PER_PATTERN_US));
+displayInfo("StimJim port:  " + sport);
+displayInfo("--------------------------------------------");
+
+// ----------------------------------------------------------
+// Step 2 — Parse patterns and program StimJim
+//
+// Digit-labelled lines in the settings file look like:
+//   1) A50,a150 | S0,0,1,1000,100000; 100,-100,100; -50,50,20; % Baseline
+//   2) i200,L50 | S1,1,1,2000,200000; 200,-200,200;            % Strong stim
+//
+// We collect the StimJim S command from the "| ..." field,
+// rebuild it with the overridden duration, then send it.
+// The pattern number used in S# comes from the settings file label,
+// preserving the assignment used during the real experiment.
+// ----------------------------------------------------------
+ArrayList patternNumbers  = new ArrayList();  // Integer — pattern slot on StimJim
+ArrayList sCommands       = new ArrayList();  // String  — rebuilt S# command to send
+
+for (int i = PATTERN_DEFS_START; i < fromfile.length; i++) {
+    String raw = fromfile[i];
+    if (raw == null) continue;
+    raw = raw.trim();
+    if (raw.length() == 0) continue;
+
+    // Pattern lines: single char label followed by ")"
+    if (raw.length() < 3 || raw.charAt(1) != ')') continue;
+
+    char labelChar = raw.charAt(0);
+
+    // Skip letter-labelled lines (delays, valve commands — no electrical stim)
+    if (!Character.isDigit(labelChar)) continue;
+
+    int patternNumber = Character.getNumericValue(labelChar);
+
+    // Strip comment (after " % ")
+    int pctIdx = raw.indexOf(" % ");
+    if (pctIdx >= 0) raw = raw.substring(0, pctIdx).trim();
+
+    // Body after "N) "
+    String body = raw.substring(2).trim();
+
+    // Split on " | " — StimJim command is the part after the pipe
+    String stimjimCmd = "";
+    int pipeIdx = body.indexOf(" | ");
+    if (pipeIdx >= 0)
+        stimjimCmd = body.substring(pipeIdx + 3).trim();
+
+    // Must start with "S" to be a valid StimJim set command
+    if (!stimjimCmd.startsWith("S")) {
+        displayInfo("Skipping pattern [" + labelChar
+                    + "]: no S command found in StimJim field ('" + stimjimCmd + "')");
+        continue;
+    }
+
+    // Rebuild the command with the overridden train duration
+    String rebuiltCmd = rebuildSCommand(stimjimCmd, STIM_TIME_PER_PATTERN_US);
+
+    patternNumbers.add(Integer.valueOf(patternNumber));
+    sCommands.add(rebuiltCmd);
+    displayInfo("Queued pattern [" + patternNumber + "]: " + rebuiltCmd);
+}
+
+if (patternNumbers.isEmpty()) {
+    displayInfo("ERROR: No StimJim S commands found in settings file. Aborting.");
+    return;
+}
+
+int numPatterns = patternNumbers.size();
+displayInfo("--------------------------------------------");
+displayInfo("Programming " + numPatterns + " pattern(s) into StimJim...");
+
+for (int p = 0; p < numPatterns; p++) {
+    if (abortRequested) {
+        displayInfo("Abort requested during StimJim programming — stopping.");
+        return;
+    }
+
+    int    pNum = ((Integer) patternNumbers.get(p)).intValue();
+    String cmd  = (String)  sCommands.get(p);
+
+    displayInfo("  Sending: " + cmd);
+    mmc.setSerialPortCommand(sport, cmd, "\n");
+    mmc.sleep(SERIAL_WAIT);
+
+    // printPulseTrainParameters() output always contains "mV" or "uA";
+    // waitForSerial matches on "V" which is present in both.
+    waitForSerial(sport, "V");
+    displayInfo("  StimJim accepted pattern " + pNum + ".");
+}
+
+displayInfo("All patterns programmed.");
+displayInfo("--------------------------------------------");
+
+// ----------------------------------------------------------
+// Step 3 — Create output folder and start 4 kHz datalogger
+// ----------------------------------------------------------
+String waveformFolder = goodguisavepath + "/" + WAVEFORM_FOLDER_NAME;
+mkDir(waveformFolder);
+String saveFile = waveformFolder + "/Experiment_" + ExpDate + "_stim_test.log";
+
+// Recording duration = all pattern slots + 2 s serial-delay padding
+int secToRecord = (int)(numPatterns * TOTAL_TIME_PER_PATTERN_SEC) + 2;
+displayInfo("Logger will record ~" + secToRecord + " s -> " + saveFile);
+
+ConfigureLogging(PYTHON_PATH, LOGGER_SCRIPT, LOGGER_COM_PORT, saveFile, secToRecord);
+
+// Allow the logger process to initialise before triggering stimulation
+mmc.sleep(2000);
+displayInfo("Datalogger running.");
+displayInfo("--------------------------------------------");
+
+// ----------------------------------------------------------
+// Step 4 — Trigger each pattern in sequence
+// ----------------------------------------------------------
+displayInfo("Starting stimulation sequence (" + numPatterns + " patterns)...");
+
+for (int p = 0; p < numPatterns; p++) {
+    if (abortRequested) {
+        displayInfo("Abort requested — stopping stimulation sequence.");
+        break;
+    }
+
+    int    pNum       = ((Integer) patternNumbers.get(p)).intValue();
+    String triggerCmd = "T" + pNum;
+
+    String startTime = new SimpleDateFormat("HH:mm:ss.SSS").format(new Date());
+    displayInfo("  [" + startTime + "] Pattern " + pNum
+                + " (" + (p + 1) + "/" + numPatterns + "): " + triggerCmd);
+
+    mmc.setSerialPortCommand(sport, triggerCmd, "\n");
+    mmc.sleep(SERIAL_WAIT);
+
+    // Wait out the remainder of the total slot, counting down in 1 s ticks
+    long remainingMs = TOTAL_TIME_PER_PATTERN_MS - SERIAL_WAIT;
+    if (remainingMs > 0) {
+        int remainingSec = (int)(remainingMs / 1000);
+        mmc.sleep((int)(remainingMs - remainingSec * 1000L));  // sub-second tail
+
+        for (int t = remainingSec; t > 0; t--) {
+            if (abortRequested) {
+                displayInfo("Abort: interval wait cancelled.");
+                break;
+            }
+            mmc.sleep(1000);
+            if (abort != null) abort.setText("Abort (" + (t - 1) + "s)");
+        }
+        if (abort != null) abort.setText("Abort");
+    }
+}
+
+// ----------------------------------------------------------
+// Step 5 — Force stimulation off
+// T-1 calls startIT0(-1) in the firmware, which ends the
+// IntervalTimer and grounds all outputs cleanly.
+// ----------------------------------------------------------
+displayInfo("--------------------------------------------");
+displayInfo("Stopping StimJim (T-1)...");
+mmc.setSerialPortCommand(sport, "T-1", "\n");
+mmc.sleep(SERIAL_WAIT);
+displayInfo("StimJim stopped.");
+
+String endTime = new SimpleDateFormat("HH:mm:ss.SSS").format(new Date());
+displayInfo("--------------------------------------------");
+displayInfo("[" + endTime + "] Validation complete.");
+displayInfo("Log file: " + saveFile);
+displayInfo("*** End of StimValidation ***");
